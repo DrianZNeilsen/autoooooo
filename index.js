@@ -15,7 +15,6 @@ const pw = '12345678';
 const sessions = {};
 let productCache = [];
 
-// Escape karakter khusus Markdown
 function escapeMarkdown(text) {
   if (!text) return '';
   return text
@@ -38,8 +37,21 @@ function hargaSetelahProfit(basePrice, role = 'user') {
 function generateRandomFee() {
   return Math.floor(Math.random() * 90 + 10);
 }
-
 const isAdmin = (id) => id.toString() === ADMIN_ID;
+
+// === USER DATABASE ===
+function ensureUser(user) {
+  let users = [];
+  if (fs.existsSync('user.json')) {
+    try {
+      users = JSON.parse(fs.readFileSync('user.json'));
+    } catch (e) {}
+  }
+  if (!users.find(u => u.id === user.id)) {
+    users.push({ id: user.id, username: user.username || '', first_name: user.first_name || '', last_name: user.last_name || '' });
+    fs.writeFileSync('user.json', JSON.stringify(users, null, 2));
+  }
+}
 
 // === PRODUK .json DENGAN KEYBOARD PAGINATION ===
 function sendProdukKeyboard(chatId, page = 0) {
@@ -48,7 +60,6 @@ function sendProdukKeyboard(chatId, page = 0) {
   const totalPages = Math.ceil(produkList.length / perPage);
   const currentProducts = produkList.slice(page * perPage, (page + 1) * perPage);
 
-  // 2 baris, masing-masing 5 produk
   let keyboard = [];
   for (let i = 0; i < currentProducts.length; i += 5) {
     keyboard.push(
@@ -58,7 +69,6 @@ function sendProdukKeyboard(chatId, page = 0) {
     );
   }
 
-  // Navigasi halaman
   let nav = [];
   if (page > 0) nav.push({ text: '⬅️ Prev' });
   if (page < totalPages - 1) nav.push({ text: 'Next ➡️' });
@@ -72,7 +82,6 @@ function sendProdukKeyboard(chatId, page = 0) {
     }
   });
 
-  // Simpan produk di sesi untuk pemilihan berikutnya
   sessions[chatId] = { ...sessions[chatId], produkKeyboard: currentProducts, produkPage: page };
 }
 
@@ -80,6 +89,9 @@ function sendProdukKeyboard(chatId, page = 0) {
 bot.onText(/\/start/, (msg) => {
   const chatId = msg.chat.id;
   const userId = msg.from.id.toString();
+
+  // Tambah user ke user.json
+  ensureUser(msg.from);
 
   let menu = [
     { text: '🛍 Produk' },
@@ -93,7 +105,10 @@ bot.onText(/\/start/, (msg) => {
     { text: '🥚 Order Eggy Party' },
     { text: '📱 Order Pulsa' }
   ];
-  if (userId === ADMIN_ID) menu.push({ text: '🛠 Manager' });
+  if (userId === ADMIN_ID) {
+    menu.push({ text: '🛠 Manager' });
+    menu.push({ text: '📢 Broadcast' });
+  }
 
   let keyboard = [];
   for (let i = 0; i < menu.length; i += 3) {
@@ -115,6 +130,31 @@ bot.on('message', async (msg) => {
   const userId = msg.from.id.toString();
   const text = msg.text?.toLowerCase() || '';
   const session = sessions[userId];
+
+  // Tambah user ke user.json setiap interaksi
+  ensureUser(msg.from);
+
+  // FITUR BROADCAST UNTUK ADMIN
+  if (msg.text === '📢 Broadcast' && userId === ADMIN_ID) {
+    sessions[userId] = { mode: 'awaiting_broadcast' };
+    return bot.sendMessage(chatId, 'Ketik pesan yang ingin di-broadcast ke seluruh pengguna:');
+  }
+
+  // Handler proses broadcast
+  if (session && session.mode === 'awaiting_broadcast' && userId === ADMIN_ID) {
+    const users = fs.existsSync('user.json') ? JSON.parse(fs.readFileSync('user.json')) : [];
+    let sukses = 0, gagal = 0;
+    for (const u of users) {
+      try {
+        await bot.sendMessage(u.id, `📢 Pesan Broadcast dari Admin:\n\n${msg.text}`);
+        sukses++;
+      } catch (e) {
+        gagal++;
+      }
+    }
+    delete sessions[userId];
+    return bot.sendMessage(chatId, `Broadcast selesai!\nBerhasil: ${sukses}\nGagal: ${gagal}`);
+  }
 
   // === FITUR BATALKAN TRANSAKSI DENGAN KETIK "batal" ===
   if (text === 'batal') {
@@ -147,7 +187,6 @@ bot.on('message', async (msg) => {
     const produk = sessions[chatId].produkKeyboard.find(p => msg.text.startsWith(p.nama));
     if (produk) {
       if (produk.stok < 1) return bot.sendMessage(chatId, '❌ Produk tidak tersedia atau stok habis.');
-      // Proses pembayaran seperti produkjson_
       const role = 'user';
       const basePrice = hargaSetelahProfit(produk.harga);
       const fee = generateRandomFee();
@@ -157,7 +196,7 @@ bot.on('message', async (msg) => {
       const formattedTime = new Date(expireAt).toLocaleTimeString('id-ID', { timeZone: 'Asia/Jakarta', hour: '2-digit', minute: '2-digit' });
 
       const qrisImage = 'img/qris.jpg';
-      let caption = `*🧾 MENUNGGU PEMBAYARAN 🧾*\n\n*Produk:* ${escapeMarkdown(produk.nama)}\nHarga: Rp${toRupiah(basePrice)} + 2 digit acak\nTotal: Rp${toRupiah(total)}\n\nSilakan bayar sebelum *${formattedTime}* melalui QRIS berikut:`;
+      let caption = `*🧾 MENUNGGU PEMBAYARAN 🧾*\n\n*Produk:* ${escapeMarkdown(produk.nama)}\nHarga: Rp${toRupiah(basePrice)} + 2 digit acak\nTotal: Rp${toRupiah(total)}\n\nSilakan bayar sebelum *${formattedTime}* atau pesanan otomatis dibatalkan.`;
 
       await bot.sendPhoto(chatId, fs.createReadStream(qrisImage), {
         caption,
@@ -183,7 +222,6 @@ bot.on('message', async (msg) => {
 
             const prod = produkList.find(p => p.kode === produk.kode);
             let stok_item;
-            // Cari stok yang tidak kosong (bisa grup)
             for (let i = 0; i < prod.stok_data.length; i++) {
               if (prod.stok_data[i].trim() !== '') {
                 stok_item = prod.stok_data[i];
@@ -228,7 +266,6 @@ bot.on('message', async (msg) => {
     }
   }
 
-  // Setelah pilih provider, tampilkan nominal
   if (session && session.step === 'awaiting_provider_pulsa') {
     const provider = msg.text.trim();
     const pulsaList = session.pulsaList || [];
@@ -246,13 +283,11 @@ bot.on('message', async (msg) => {
     });
   }
 
-  // Setelah pilih nominal, minta nomor HP
   if (session && session.step === 'awaiting_nomor_pulsa') {
     const nomor = msg.text.replace(/[^0-9]/g, '');
     if (nomor.length < 10 || nomor.length > 15) {
       return bot.sendMessage(chatId, 'Nomor HP tidak valid. Masukkan nomor yang benar.');
     }
-    // Lanjutkan ke pembayaran pulsa
     return handleOrderGame(chatId, userId, session.produk, { nomor }, 'pulsa');
   }
 
@@ -353,19 +388,16 @@ bot.on('message', async (msg) => {
 
   // === TAMBAH PRODUK BARU DENGAN HARGA OTOMATIS SESUAI produk.json ===
   if (session && session.mode === 'add_nama') {
-    // Ambil list produk dari produk.json
     const produkList = JSON.parse(fs.readFileSync('produk.json'));
     const namaProduk = msg.text.trim();
     const produkAda = produkList.find(p => p.nama.toLowerCase() === namaProduk.toLowerCase());
     session.nama = namaProduk;
 
     if (produkAda) {
-      // Jika nama produk sudah ada, harga otomatis mengikuti harga di produk.json
       session.harga = produkAda.harga;
       session.mode = 'add_stok';
-      return bot.sendMessage(chatId, `Harga secara otomatis diambil dari produk.json: *Rp${toRupiah(produkAda.harga)}*\n\nMasukkan *data stok* (setiap baris bisa berisi satu atau beberapa item, contoh:\nitem1, item2, item3\nbaris berikutnya juga bisa satu atau lebih, pisahkan baris dengan ENTER):`, { parse_mode: 'Markdown' });
+      return bot.sendMessage(chatId, `Harga secara otomatis diambil dari produk.json: *Rp${toRupiah(produkAda.harga)}*\n\nMasukkan *data stok* (setiap baris bisa berisi satu atau beberapa item, contoh:\nitem1, item2, item3\nbaris berikutnya juga bisa satu atau lebih, pisahkan baris dengan ENTER)`, { parse_mode: 'Markdown' });
     } else {
-      // Produk benar-benar baru, harga harus diinput manual
       session.mode = 'add_harga';
       return bot.sendMessage(chatId, 'Produk baru, masukkan *harga* produk:', { parse_mode: 'Markdown' });
     }
@@ -375,7 +407,7 @@ bot.on('message', async (msg) => {
     if (isNaN(harga)) return bot.sendMessage(chatId, '⚠️ Masukkan angka yang valid untuk harga.');
     session.harga = harga;
     session.mode = 'add_stok';
-    return bot.sendMessage(chatId, 'Masukkan *data stok* (setiap baris bisa berisi satu atau beberapa item, contoh:\nitem1, item2, item3\nbaris berikutnya juga bisa satu atau lebih, pisahkan baris dengan ENTER):', { parse_mode: 'Markdown' });
+    return bot.sendMessage(chatId, 'Masukkan *data stok* (setiap baris bisa berisi satu atau beberapa item, contoh:\nitem1, item2, item3\nbaris berikutnya juga bisa satu atau lebih, pisahkan baris dengan ENTER)', { parse_mode: 'Markdown' });
   }
   if (session && session.mode === 'add_stok') {
     const stok_data = msg.text.split('\n').map(line => line.trim()).filter(Boolean);
@@ -394,7 +426,7 @@ bot.on('message', async (msg) => {
     return bot.sendMessage(chatId, `✅ Produk baru berhasil ditambahkan!\n\nNama: ${escapeMarkdown(session.nama)}\nHarga: Rp${toRupiah(session.harga)}\nJumlah baris stok: ${stok_data.length}`, { parse_mode: 'Markdown' });
   }
 
-  // === ORDER MOBILE LEGENDS ===
+  // === ORDER MOBILE LEGENDS, PUBG, dst ===
   if (session && session.step === 'awaiting_userid_ml') {
     session.userId = msg.text.trim();
     session.step = 'awaiting_zoneid_ml';
@@ -409,8 +441,6 @@ bot.on('message', async (msg) => {
     }
     return handleOrderGame(chatId, userId, produk, session, 'ml');
   }
-
-  // === ORDER PUBG ===
   if (session && session.step === 'awaiting_userid_pubg') {
     session.userId = msg.text.trim();
     const produk = productCache.find(p => p.kode === session.kode);
@@ -420,8 +450,6 @@ bot.on('message', async (msg) => {
     }
     return handleOrderGame(chatId, userId, produk, session, 'pubg');
   }
-
-  // === ORDER FREE FIRE ===
   if (session && session.step === 'awaiting_userid_ff') {
     session.userId = msg.text.trim();
     const produk = productCache.find(p => p.kode === session.kode);
@@ -431,8 +459,6 @@ bot.on('message', async (msg) => {
     }
     return handleOrderGame(chatId, userId, produk, session, 'ff');
   }
-
-  // === ORDER HOK ===
   if (session && session.step === 'awaiting_userid_hok') {
     session.userId = msg.text.trim();
     const produk = productCache.find(p => p.kode === session.kode);
@@ -442,8 +468,6 @@ bot.on('message', async (msg) => {
     }
     return handleOrderGame(chatId, userId, produk, session, 'hok');
   }
-
-  // === ORDER GENSHIN ===
   if (session && session.step === 'awaiting_userid_genshin') {
     session.userId = msg.text.trim();
     const produk = productCache.find(p => p.kode === session.kode);
@@ -453,8 +477,6 @@ bot.on('message', async (msg) => {
     }
     return handleOrderGame(chatId, userId, produk, session, 'genshin');
   }
-
-  // === ORDER LORD MOBILE ===
   if (session && session.step === 'awaiting_userid_lordmobile') {
     session.userId = msg.text.trim();
     const produk = productCache.find(p => p.kode === session.kode);
@@ -464,8 +486,6 @@ bot.on('message', async (msg) => {
     }
     return handleOrderGame(chatId, userId, produk, session, 'lordmobile');
   }
-
-  // === ORDER COD ===
   if (session && session.step === 'awaiting_userid_cod') {
     session.userId = msg.text.trim();
     const produk = productCache.find(p => p.kode === session.kode);
@@ -475,8 +495,6 @@ bot.on('message', async (msg) => {
     }
     return handleOrderGame(chatId, userId, produk, session, 'cod');
   }
-
-  // === ORDER EGGY PARTY ===
   if (session && session.step === 'awaiting_userid_eggy') {
     session.userId = msg.text.trim();
     const produk = productCache.find(p => p.kode === session.kode);
@@ -500,7 +518,6 @@ bot.on('message', async (msg) => {
       if (isNaN(hargaBaru)) return bot.sendMessage(chatId, '⚠️ Masukkan angka yang valid untuk harga.');
       produk.harga = hargaBaru;
     } else if (session.mode === 'edit_stok') {
-      // Mendukung multi-baris, setiap baris bisa grup stok, tambah ke stok_data
       const stokBaru = msg.text.split('\n').map(s => s.trim()).filter(Boolean);
       produk.stok_data = produk.stok_data.concat(stokBaru);
       produk.stok = produk.stok_data.length;
@@ -549,6 +566,9 @@ bot.on('callback_query', async (cb) => {
   const data = cb.data;
   const produkList = JSON.parse(fs.readFileSync('produk.json'));
   const session = sessions[userId];
+
+  // Tambah user ke user.json setiap interaksi
+  ensureUser(cb.from);
 
   // === CALLBACK PULSA ===
   if (data.startsWith('pilihnominalpulsa_')) {
@@ -686,7 +706,7 @@ bot.on('callback_query', async (cb) => {
     const formattedTime = new Date(expireAt).toLocaleTimeString('id-ID', { timeZone: 'Asia/Jakarta', hour: '2-digit', minute: '2-digit' });
 
     const qrisImage = 'img/qris.jpg';
-    let caption = `*🧾 MENUNGGU PEMBAYARAN 🧾*\n\n*Produk:* ${escapeMarkdown(produk.nama)}\nHarga: Rp${toRupiah(basePrice)} + 2 digit acak\nTotal: Rp${toRupiah(total)}\n\nSilakan bayar sebelum *${formattedTime}* melalui QRIS berikut:`;
+    let caption = `*🧾 MENUNGGU PEMBAYARAN 🧾*\n\n*Produk:* ${escapeMarkdown(produk.nama)}\nHarga: Rp${toRupiah(basePrice)} + 2 digit acak\nTotal: Rp${toRupiah(total)}\n\nSilakan bayar sebelum *${formattedTime}* atau pesanan otomatis dibatalkan.`;
 
     await bot.sendPhoto(chatId, fs.createReadStream(qrisImage), {
       caption,
@@ -825,7 +845,7 @@ async function handleOrderGame(chatId, userId, produk, session, game) {
   const expireAt = Date.now() + 5 * 60000;
   const formattedTime = new Date(expireAt).toLocaleTimeString('id-ID', { timeZone: 'Asia/Jakarta', hour: '2-digit', minute: '2-digit' });
 
-  let caption = `*🧾 MENUNGGU PEMBAYARAN 🧾*\n\n*Produk ID:* ${escapeMarkdown(produk.kode)}\n${detailUser}\n*Nickname:* ${escapeMarkdown(nickname)}\n\nKategori: ${escapeMarkdown(produk.kategori || '')}\nHarga: Rp${toRupiah(basePrice)} + 2 digit acak\nTotal: Rp${toRupiah(total)}\n\nSilakan bayar sebelum *${formattedTime}* melalui QRIS berikut:`;
+  let caption = `*🧾 MENUNGGU PEMBAYARAN 🧾*\n\n*Produk ID:* ${escapeMarkdown(produk.kode)}\n${detailUser}\n*Nickname:* ${escapeMarkdown(nickname)}\n\nKategori: ${escapeMarkdown(produk.kategori || produk.produk || produk.nama)}\nHarga: Rp${toRupiah(basePrice)} + 2 digit acak\nTotal: Rp${toRupiah(total)}\n\nSilakan bayar sebelum *${formattedTime}* atau pesanan otomatis dibatalkan.`;
 
   await bot.sendPhoto(chatId, fs.createReadStream(qrisImage), {
     caption,
