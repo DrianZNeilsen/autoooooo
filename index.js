@@ -157,7 +157,7 @@ bot.on('message', async (msg) => {
       const formattedTime = new Date(expireAt).toLocaleTimeString('id-ID', { timeZone: 'Asia/Jakarta', hour: '2-digit', minute: '2-digit' });
 
       const qrisImage = 'img/qris.jpg';
-      let caption = `*🧾 MENUNGGU PEMBAYARAN 🧾*\n\n*Produk:* ${escapeMarkdown(produk.nama)}\nHarga: Rp${toRupiah(basePrice)} + 2 digit acak\nTotal: Rp${toRupiah(total)}\n\nSilakan bayar sebelum *${escapeMarkdown(formattedTime)}*.`
+      let caption = `*🧾 MENUNGGU PEMBAYARAN 🧾*\n\n*Produk:* ${escapeMarkdown(produk.nama)}\nHarga: Rp${toRupiah(basePrice)} + 2 digit acak\nTotal: Rp${toRupiah(total)}\n\nSilakan bayar sebelum *${formattedTime}* melalui QRIS berikut:`;
 
       await bot.sendPhoto(chatId, fs.createReadStream(qrisImage), {
         caption,
@@ -182,11 +182,19 @@ bot.on('message', async (msg) => {
             bot.sendMessage(chatId, '✅ Pembayaran diterima! Memproses pesanan...');
 
             const prod = produkList.find(p => p.kode === produk.kode);
-            const stok = prod.stok_data.shift();
+            let stok_item;
+            // Cari stok yang tidak kosong (bisa grup)
+            for (let i = 0; i < prod.stok_data.length; i++) {
+              if (prod.stok_data[i].trim() !== '') {
+                stok_item = prod.stok_data[i];
+                prod.stok_data.splice(i, 1);
+                break;
+              }
+            }
             prod.stok = prod.stok_data.length;
             fs.writeFileSync('produk.json', JSON.stringify(produkList, null, 2));
 
-            bot.sendMessage(chatId, `🎉 *TRANSAKSI SUKSES* 🎉\n\nProduk: ${escapeMarkdown(prod.nama)}\nRefID: ${escapeMarkdown(reffId)}\nKode: ${escapeMarkdown(stok)}`, {
+            bot.sendMessage(chatId, `🎉 *TRANSAKSI SUKSES* 🎉\n\nProduk: ${escapeMarkdown(prod.nama)}\nRefID: ${escapeMarkdown(reffId)}\nKode:\n${escapeMarkdown(stok_item)}`, {
               parse_mode: 'Markdown'
             });
           }
@@ -343,21 +351,34 @@ bot.on('message', async (msg) => {
     return;
   }
 
-  // === TAMBAH PRODUK BARU ===
+  // === TAMBAH PRODUK BARU DENGAN HARGA OTOMATIS SESUAI produk.json ===
   if (session && session.mode === 'add_nama') {
-    session.nama = msg.text.trim();
-    session.mode = 'add_harga';
-    return bot.sendMessage(chatId, 'Masukkan *harga* produk:', { parse_mode: 'Markdown' });
+    // Ambil list produk dari produk.json
+    const produkList = JSON.parse(fs.readFileSync('produk.json'));
+    const namaProduk = msg.text.trim();
+    const produkAda = produkList.find(p => p.nama.toLowerCase() === namaProduk.toLowerCase());
+    session.nama = namaProduk;
+
+    if (produkAda) {
+      // Jika nama produk sudah ada, harga otomatis mengikuti harga di produk.json
+      session.harga = produkAda.harga;
+      session.mode = 'add_stok';
+      return bot.sendMessage(chatId, `Harga secara otomatis diambil dari produk.json: *Rp${toRupiah(produkAda.harga)}*\n\nMasukkan *data stok* (setiap baris bisa berisi satu atau beberapa item, contoh:\nitem1, item2, item3\nbaris berikutnya juga bisa satu atau lebih, pisahkan baris dengan ENTER):`, { parse_mode: 'Markdown' });
+    } else {
+      // Produk benar-benar baru, harga harus diinput manual
+      session.mode = 'add_harga';
+      return bot.sendMessage(chatId, 'Produk baru, masukkan *harga* produk:', { parse_mode: 'Markdown' });
+    }
   }
   if (session && session.mode === 'add_harga') {
     const harga = parseInt(msg.text.trim());
     if (isNaN(harga)) return bot.sendMessage(chatId, '⚠️ Masukkan angka yang valid untuk harga.');
     session.harga = harga;
     session.mode = 'add_stok';
-    return bot.sendMessage(chatId, 'Masukkan *stok* produk (pisahkan dengan koma, contoh: kode1,kode2,kode3):', { parse_mode: 'Markdown' });
+    return bot.sendMessage(chatId, 'Masukkan *data stok* (setiap baris bisa berisi satu atau beberapa item, contoh:\nitem1, item2, item3\nbaris berikutnya juga bisa satu atau lebih, pisahkan baris dengan ENTER):', { parse_mode: 'Markdown' });
   }
   if (session && session.mode === 'add_stok') {
-    const stok_data = msg.text.split(',').map(s => s.trim()).filter(Boolean);
+    const stok_data = msg.text.split('\n').map(line => line.trim()).filter(Boolean);
     if (stok_data.length === 0) return bot.sendMessage(chatId, '⚠️ Stok tidak boleh kosong.');
     const kode = 'P' + Date.now().toString(36) + Math.floor(Math.random()*1000).toString(36);
     const produkList = JSON.parse(fs.readFileSync('produk.json'));
@@ -370,7 +391,7 @@ bot.on('message', async (msg) => {
     });
     fs.writeFileSync('produk.json', JSON.stringify(produkList, null, 2));
     delete sessions[userId];
-    return bot.sendMessage(chatId, `✅ Produk baru berhasil ditambahkan!\n\nNama: ${escapeMarkdown(session.nama)}\nHarga: Rp${toRupiah(session.harga)}\nStok: ${stok_data.length}`, { parse_mode: 'Markdown' });
+    return bot.sendMessage(chatId, `✅ Produk baru berhasil ditambahkan!\n\nNama: ${escapeMarkdown(session.nama)}\nHarga: Rp${toRupiah(session.harga)}\nJumlah baris stok: ${stok_data.length}`, { parse_mode: 'Markdown' });
   }
 
   // === ORDER MOBILE LEGENDS ===
@@ -479,7 +500,8 @@ bot.on('message', async (msg) => {
       if (isNaN(hargaBaru)) return bot.sendMessage(chatId, '⚠️ Masukkan angka yang valid untuk harga.');
       produk.harga = hargaBaru;
     } else if (session.mode === 'edit_stok') {
-      const stokBaru = msg.text.split(',').map(s => s.trim()).filter(Boolean);
+      // Mendukung multi-baris, setiap baris bisa grup stok, tambah ke stok_data
+      const stokBaru = msg.text.split('\n').map(s => s.trim()).filter(Boolean);
       produk.stok_data = produk.stok_data.concat(stokBaru);
       produk.stok = produk.stok_data.length;
     }
@@ -664,7 +686,7 @@ bot.on('callback_query', async (cb) => {
     const formattedTime = new Date(expireAt).toLocaleTimeString('id-ID', { timeZone: 'Asia/Jakarta', hour: '2-digit', minute: '2-digit' });
 
     const qrisImage = 'img/qris.jpg';
-    let caption = `*🧾 MENUNGGU PEMBAYARAN 🧾*\n\n*Produk:* ${escapeMarkdown(produk.nama)}\nHarga: Rp${toRupiah(basePrice)} + 2 digit acak\nTotal: Rp${toRupiah(total)}\n\nSilakan bayar sebelum *${escapeMarkdown(formattedTime)}*.`
+    let caption = `*🧾 MENUNGGU PEMBAYARAN 🧾*\n\n*Produk:* ${escapeMarkdown(produk.nama)}\nHarga: Rp${toRupiah(basePrice)} + 2 digit acak\nTotal: Rp${toRupiah(total)}\n\nSilakan bayar sebelum *${formattedTime}* melalui QRIS berikut:`;
 
     await bot.sendPhoto(chatId, fs.createReadStream(qrisImage), {
       caption,
@@ -689,11 +711,18 @@ bot.on('callback_query', async (cb) => {
           bot.sendMessage(chatId, '✅ Pembayaran diterima! Memproses pesanan...');
 
           const prod = produkList.find(p => p.kode === kode);
-          const stok = prod.stok_data.shift();
+          let stok_item;
+          for (let i = 0; i < prod.stok_data.length; i++) {
+            if (prod.stok_data[i].trim() !== '') {
+              stok_item = prod.stok_data[i];
+              prod.stok_data.splice(i, 1);
+              break;
+            }
+          }
           prod.stok = prod.stok_data.length;
           fs.writeFileSync('produk.json', JSON.stringify(produkList, null, 2));
 
-          bot.sendMessage(chatId, `🎉 *TRANSAKSI SUKSES* 🎉\n\nProduk: ${escapeMarkdown(prod.nama)}\nRefID: ${escapeMarkdown(reffId)}\nKode: ${escapeMarkdown(stok)}`, {
+          bot.sendMessage(chatId, `🎉 *TRANSAKSI SUKSES* 🎉\n\nProduk: ${escapeMarkdown(prod.nama)}\nRefID: ${escapeMarkdown(reffId)}\nKode:\n${escapeMarkdown(stok_item)}`, {
             parse_mode: 'Markdown'
           });
         }
@@ -727,8 +756,14 @@ bot.on('callback_query', async (cb) => {
   } else if (data.startsWith('edit_')) {
     const [_, jenis, kode] = data.split('_');
     sessions[userId] = { mode: `edit_${jenis}`, kode };
-    const label = jenis === 'nama' ? 'nama baru' : jenis === 'harga' ? 'harga baru' : 'data stok (pisah koma)';
+    const label = jenis === 'nama' ? 'nama baru' : jenis === 'harga' ? 'harga baru' : 'data stok (setiap baris satu stok, bisa lebih dari satu item dipisahkan koma, pisahkan baris dengan ENTER)';
     bot.sendMessage(chatId, `Kirim ${label} untuk produk ${escapeMarkdown(kode)}:`);
+    return;
+  }
+  // Tambah produk baru
+  if (data === 'add_produk_baru') {
+    sessions[userId] = { mode: 'add_nama' };
+    bot.sendMessage(chatId, 'Masukkan *nama* produk:', { parse_mode: 'Markdown' });
     return;
   }
   // Batalkan pesanan
@@ -790,7 +825,7 @@ async function handleOrderGame(chatId, userId, produk, session, game) {
   const expireAt = Date.now() + 5 * 60000;
   const formattedTime = new Date(expireAt).toLocaleTimeString('id-ID', { timeZone: 'Asia/Jakarta', hour: '2-digit', minute: '2-digit' });
 
-  let caption = `*🧾 MENUNGGU PEMBAYARAN 🧾*\n\n*Produk ID:* ${escapeMarkdown(produk.kode)}\n${detailUser}\n*Nickname:* ${escapeMarkdown(nickname)}\n\nKategori: ${escapeMarkdown(produk.kategori || "-")}\nProduk: ${escapeMarkdown(produk.keterangan || produk.nama)}\nHarga: Rp${toRupiah(basePrice)} + 2 digit acak\nTotal: Rp${toRupiah(total)}\n\nSilakan bayar sebelum *${escapeMarkdown(formattedTime)}*.`
+  let caption = `*🧾 MENUNGGU PEMBAYARAN 🧾*\n\n*Produk ID:* ${escapeMarkdown(produk.kode)}\n${detailUser}\n*Nickname:* ${escapeMarkdown(nickname)}\n\nKategori: ${escapeMarkdown(produk.kategori || '')}\nHarga: Rp${toRupiah(basePrice)} + 2 digit acak\nTotal: Rp${toRupiah(total)}\n\nSilakan bayar sebelum *${formattedTime}* melalui QRIS berikut:`;
 
   await bot.sendPhoto(chatId, fs.createReadStream(qrisImage), {
     caption,
