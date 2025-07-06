@@ -24,33 +24,39 @@ function escapeMarkdown(text) {
     .replace(/\[/g, '\\[')
     .replace(/`/g, '\\`');
 }
-
 function toRupiah(number) {
   return number.toLocaleString('id-ID');
 }
-
-function hargaSetelahProfit(basePrice, role = 'user') {
+function hargaSetelahProfit(basePrice, role = 'user', kategori = '') {
   let margin = role === 'reseller' ? 1000 : 1500;
   return parseInt(basePrice) + margin;
 }
-
 function generateRandomFee() {
   return Math.floor(Math.random() * 90 + 10);
 }
-const isAdmin = (id) => id.toString() === ADMIN_ID;
-
-// === USER DATABASE ===
 function ensureUser(user) {
   let users = [];
   if (fs.existsSync('user.json')) {
-    try {
-      users = JSON.parse(fs.readFileSync('user.json'));
-    } catch (e) {}
+    try { users = JSON.parse(fs.readFileSync('user.json')); } catch (e) {}
   }
   if (!users.find(u => u.id === user.id)) {
     users.push({ id: user.id, username: user.username || '', first_name: user.first_name || '', last_name: user.last_name || '' });
     fs.writeFileSync('user.json', JSON.stringify(users, null, 2));
   }
+}
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+async function getNickname(product, userId, zoneId) {
+  if (/mobile legends/i.test(product.produk || product.nama)) return `[ML] ${userId} (${zoneId})`;
+  if (/pubg/i.test(product.produk || product.nama)) return `[PUBG] ${userId}`;
+  if (/free fire/i.test(product.produk || product.nama)) return `[FF] ${userId}`;
+  if (/genshin/i.test(product.produk || product.nama)) return `[GI] ${userId}`;
+  if (/honor of king/i.test(product.produk || product.nama)) return `[HOK] ${userId}`;
+  if (/call of duty/i.test(product.produk || product.nama)) return `[COD] ${userId}`;
+  if (/eggy/i.test(product.produk || product.nama)) return `[Eggy] ${userId}`;
+  if (/lord mobile/i.test(product.produk || product.nama)) return `[LordMobile] ${userId}`;
+  return userId;
 }
 
 // === PRODUK .json DENGAN KEYBOARD PAGINATION ===
@@ -68,7 +74,6 @@ function sendProdukKeyboard(chatId, page = 0) {
       }))
     );
   }
-
   let nav = [];
   if (page > 0) nav.push({ text: '⬅️ Prev' });
   if (page < totalPages - 1) nav.push({ text: 'Next ➡️' });
@@ -85,12 +90,126 @@ function sendProdukKeyboard(chatId, page = 0) {
   sessions[chatId] = { ...sessions[chatId], produkKeyboard: currentProducts, produkPage: page };
 }
 
-// === START HANDLER DENGAN CUSTOM KEYBOARD ===
+function sendProductPage(chatId, page, game = 'ml') {
+  const perPage = 5;
+  const totalPages = Math.ceil(productCache.length / perPage);
+  const currentProducts = productCache.slice(page * perPage, (page + 1) * perPage);
+
+  const buttons = currentProducts.map(p => [{
+    text: `${p.keterangan || p.nama} - Rp${toRupiah(hargaSetelahProfit(p.harga))}`,
+    callback_data: `${game}order_${p.kode}`
+  }]);
+
+  if (page > 0) buttons.push([{ text: '⬅️ Sebelumnya', callback_data: `${game}page_${page - 1}` }]);
+  if (page < totalPages - 1) buttons.push([{ text: '➡️ Selanjutnya', callback_data: `${game}page_${page + 1}` }]);
+
+  let title = '🛒 *Produk* ';
+  if (game === 'ml') title += 'Mobile Legends';
+  else if (game === 'pubg') title += 'PUBG';
+  else if (game === 'ff') title += 'Free Fire';
+  else if (game === 'hok') title += 'Honor of King';
+  else if (game === 'genshin') title += 'Genshin Impact';
+  else if (game === 'lordmobile') title += 'Lord Mobile';
+  else if (game === 'cod') title += 'Call of Duty';
+  else if (game === 'eggy') title += 'Eggy Party';
+
+  bot.sendMessage(chatId, `${title}\nHalaman ${page + 1} dari ${totalPages}`, {
+    parse_mode: 'Markdown',
+    reply_markup: { inline_keyboard: buttons }
+  });
+}
+
+// === TRANSAKSI OTOMATIS SEMUA ORDER (GAME/PULSA) ===
+async function handleOrderGame(chatId, userId, produk, session, game) {
+  let tujuan = '';
+  let detailUser = '', userIdGame = '', zoneId = '';
+  if (game === 'pulsa') {
+    userIdGame = session.nomor;
+    detailUser = `*Nomor HP:* ${escapeMarkdown(session.nomor)}`;
+    tujuan = userIdGame;
+  } else if (game === 'ml') {
+    userIdGame = session.userId;
+    zoneId = session.zoneId;
+    tujuan = `${userIdGame}${zoneId}`;
+    detailUser = `*User ID:* ${escapeMarkdown(userIdGame)}\n*Zone ID:* ${escapeMarkdown(zoneId)}`;
+  } else {
+    userIdGame = session.userId;
+    tujuan = userIdGame;
+    detailUser = `*User ID:* ${escapeMarkdown(userIdGame)}`;
+  }
+  const nickname = await getNickname(produk, userIdGame, zoneId);
+
+  const reffId = crypto.randomBytes(5).toString("hex").toUpperCase();
+  const harga = hargaSetelahProfit(produk.harga, 'user', produk.kategori);
+  const fee = generateRandomFee();
+  const total = harga + fee;
+
+  const qrisImage = 'img/qris.jpg';
+  const expireAt = Date.now() + 5 * 60000;
+  const formattedTime = new Date(expireAt).toLocaleTimeString('id-ID', { timeZone: 'Asia/Jakarta', hour: '2-digit', minute: '2-digit' });
+
+  let caption = `*🧾 MENUNGGU PEMBAYARAN 🧾*\n\n*Produk:* ${escapeMarkdown(produk.keterangan || produk.nama)}\n${detailUser}\n*Nickname:* ${escapeMarkdown(nickname)}\n\nKategori: ${escapeMarkdown(produk.kategori || "-")}\nHarga: Rp${toRupiah(harga)} + 2 digit acak\nTotal: Rp${toRupiah(total)}\n\nBayar sebelum *${formattedTime}* untuk memproses pesanan ini.`;
+
+  await bot.sendPhoto(chatId, fs.createReadStream(qrisImage), {
+    caption,
+    parse_mode: 'Markdown',
+    reply_markup: {
+      inline_keyboard: [[{ text: '❌ Batalkan Pesanan', callback_data: `cancel_${userId}` }]]
+    }
+  });
+
+  const interval = setInterval(async () => {
+    if (Date.now() >= expireAt) {
+      clearInterval(interval);
+      delete sessions[userId];
+      return bot.sendMessage(chatId, '❌ Waktu pembayaran habis. Pesanan dibatalkan.');
+    }
+    try {
+      const check = await axios.get(`https://gateway.okeconnect.com/api/mutasi/qris/${memberId}/${apikey_orkut}`);
+      const found = check.data.data.find(i => i.type === 'CR' && i.qris === 'static' && parseInt(i.amount) === total);
+      if (found) {
+        clearInterval(interval);
+        bot.sendMessage(chatId, '✅ Pembayaran diterima! Memproses pesanan...');
+        let orderRes = await axios.get(`https://b2b.okeconnect.com/trx-v2?product=${produk.kode}&dest=${tujuan}&refID=${reffId}&memberID=${memberId}&pin=${pin}&password=${pw}`);
+        let status = orderRes.data.status;
+        let sn = orderRes.data.sn || "-";
+        if (status === "GAGAL") {
+          bot.sendMessage(chatId, `❌ Gagal: ${orderRes.data.message}`);
+          delete sessions[userId];
+          return;
+        } else {
+          bot.sendMessage(chatId, `⏳ *TRANSAKSI PENDING*\nProduk: ${escapeMarkdown(produk.keterangan || produk.nama)}\nReffID: ${reffId}\n${detailUser}\nNickname: ${nickname}\nHarga: Rp${toRupiah(harga)}\n\nTunggu proses...`, { parse_mode: 'Markdown' });
+        }
+        while (status !== "SUKSES") {
+          await sleep(5000);
+          let cek = await axios.get(`https://b2b.okeconnect.com/trx-v2?product=${produk.kode}&dest=${tujuan}&refID=${reffId}&memberID=${memberId}&pin=${pin}&password=${pw}`);
+          status = cek.data.status;
+          sn = cek.data.sn || "-";
+          if (status === "GAGAL") {
+            bot.sendMessage(chatId, `❌ Pesanan dibatalkan!\nAlasan: ${cek.data.message}`);
+            delete sessions[userId];
+            return;
+          }
+          if (status === "SUKSES") {
+            bot.sendMessage(chatId, `✅ *TRANSAKSI SUKSES*\n\nProduk: ${escapeMarkdown(produk.keterangan || produk.nama)}\nReffID: ${reffId}\n${detailUser}\nNickname: ${nickname}\nSN: ${sn}\n\nTerima kasih sudah order!`, { parse_mode: 'Markdown' });
+            delete sessions[userId];
+            return;
+          }
+        }
+      }
+    } catch (err) {
+      console.log('ERROR:', err.message);
+    }
+  }, 10000);
+
+  sessions[userId] = { ...sessions[userId], interval };
+  session.step = null;
+}
+
+// ==== HANDLER START ====
 bot.onText(/\/start/, (msg) => {
   const chatId = msg.chat.id;
   const userId = msg.from.id.toString();
-
-  // Tambah user ke user.json
   ensureUser(msg.from);
 
   let menu = [
@@ -109,12 +228,10 @@ bot.onText(/\/start/, (msg) => {
     menu.push({ text: '🛠 Manager' });
     menu.push({ text: '📢 Broadcast' });
   }
-
   let keyboard = [];
   for (let i = 0; i < menu.length; i += 3) {
     keyboard.push(menu.slice(i, i + 3));
   }
-
   bot.sendMessage(chatId, `Selamat datang di Auto Order Bot!\n\nSilakan pilih menu di bawah ini:`, {
     reply_markup: {
       keyboard,
@@ -124,39 +241,29 @@ bot.onText(/\/start/, (msg) => {
   });
 });
 
-// === KEYBOARD HANDLER ===
+// ==== HANDLER MESSAGE ====
 bot.on('message', async (msg) => {
   const chatId = msg.chat.id;
   const userId = msg.from.id.toString();
   const text = msg.text?.toLowerCase() || '';
   const session = sessions[userId];
-
-  // Tambah user ke user.json setiap interaksi
   ensureUser(msg.from);
 
-  // FITUR BROADCAST UNTUK ADMIN
+  // === Broadcast
   if (msg.text === '📢 Broadcast' && userId === ADMIN_ID) {
     sessions[userId] = { mode: 'awaiting_broadcast' };
     return bot.sendMessage(chatId, 'Ketik pesan yang ingin di-broadcast ke seluruh pengguna:');
   }
-
-  // Handler proses broadcast
   if (session && session.mode === 'awaiting_broadcast' && userId === ADMIN_ID) {
     const users = fs.existsSync('user.json') ? JSON.parse(fs.readFileSync('user.json')) : [];
     let sukses = 0, gagal = 0;
     for (const u of users) {
-      try {
-        await bot.sendMessage(u.id, `📢 Pesan Broadcast dari Admin:\n\n${msg.text}`);
-        sukses++;
-      } catch (e) {
-        gagal++;
-      }
+      try { await bot.sendMessage(u.id, `📢 Pesan Broadcast dari Admin:\n\n${msg.text}`); sukses++; } catch (e) { gagal++; }
     }
     delete sessions[userId];
     return bot.sendMessage(chatId, `Broadcast selesai!\nBerhasil: ${sukses}\nGagal: ${gagal}`);
   }
-
-  // === FITUR BATALKAN TRANSAKSI DENGAN KETIK "batal" ===
+  // === Batalkan transaksi
   if (text === 'batal') {
     if (sessions[userId] && sessions[userId].interval) {
       clearInterval(sessions[userId].interval);
@@ -167,36 +274,24 @@ bot.on('message', async (msg) => {
     }
     return;
   }
+  // === PRODUK .json (MENU PRODUK) DENGAN PAGINATION DAN OTOMATIS QRIS
+  if (msg.text === '🛍 Produk') return sendProdukKeyboard(chatId, 0);
 
-  // === PRODUK .json DENGAN KEYBOARD PAGINATION ===
-  if (msg.text === '🛍 Produk') {
-    sendProdukKeyboard(chatId, 0);
-    return;
-  }
-  // Navigasi produk .json
   if (sessions[chatId] && sessions[chatId].produkKeyboard) {
-    if (msg.text === '⬅️ Prev') {
-      sendProdukKeyboard(chatId, Math.max(0, (sessions[chatId].produkPage || 0) - 1));
-      return;
-    }
-    if (msg.text === 'Next ➡️') {
-      sendProdukKeyboard(chatId, (sessions[chatId].produkPage || 0) + 1);
-      return;
-    }
-    // Pilih produk dari keyboard
+    if (msg.text === '⬅️ Prev') return sendProdukKeyboard(chatId, Math.max(0, (sessions[chatId].produkPage || 0) - 1));
+    if (msg.text === 'Next ➡️') return sendProdukKeyboard(chatId, (sessions[chatId].produkPage || 0) + 1);
     const produk = sessions[chatId].produkKeyboard.find(p => msg.text.startsWith(p.nama));
     if (produk) {
       if (produk.stok < 1) return bot.sendMessage(chatId, '❌ Produk tidak tersedia atau stok habis.');
       const role = 'user';
-      const basePrice = hargaSetelahProfit(produk.harga);
+      const basePrice = hargaSetelahProfit(produk.harga, role);
       const fee = generateRandomFee();
       const total = basePrice + fee;
       const reffId = crypto.randomBytes(5).toString("hex").toUpperCase();
       const expireAt = Date.now() + 5 * 60000;
       const formattedTime = new Date(expireAt).toLocaleTimeString('id-ID', { timeZone: 'Asia/Jakarta', hour: '2-digit', minute: '2-digit' });
-
       const qrisImage = 'img/qris.jpg';
-      let caption = `*🧾 MENUNGGU PEMBAYARAN 🧾*\n\n*Produk:* ${escapeMarkdown(produk.nama)}\nHarga: Rp${toRupiah(basePrice)} + 2 digit acak\nTotal: Rp${toRupiah(total)}\n\nSilakan bayar sebelum *${formattedTime}* atau pesanan otomatis dibatalkan.`;
+      let caption = `*🧾 MENUNGGU PEMBAYARAN 🧾*\n\n*Produk:* ${escapeMarkdown(produk.nama)}\nHarga: Rp${toRupiah(basePrice)} + 2 digit acak\nTotal: Rp${toRupiah(total)}\n\nSilakan bayar sebelum *${formattedTime}*.\n\nSetelah pembayaran terdeteksi, kode produk akan dikirim otomatis.`;
 
       await bot.sendPhoto(chatId, fs.createReadStream(qrisImage), {
         caption,
@@ -215,11 +310,9 @@ bot.on('message', async (msg) => {
         try {
           const check = await axios.get(`https://gateway.okeconnect.com/api/mutasi/qris/${memberId}/${apikey_orkut}`);
           const found = check.data.data.find(i => i.type === 'CR' && i.qris === 'static' && parseInt(i.amount) === total);
-
           if (found) {
             clearInterval(interval);
             bot.sendMessage(chatId, '✅ Pembayaran diterima! Memproses pesanan...');
-
             const prod = produkList.find(p => p.kode === produk.kode);
             let stok_item;
             for (let i = 0; i < prod.stok_data.length; i++) {
@@ -231,7 +324,6 @@ bot.on('message', async (msg) => {
             }
             prod.stok = prod.stok_data.length;
             fs.writeFileSync('produk.json', JSON.stringify(produkList, null, 2));
-
             bot.sendMessage(chatId, `🎉 *TRANSAKSI SUKSES* 🎉\n\nProduk: ${escapeMarkdown(prod.nama)}\nRefID: ${escapeMarkdown(reffId)}\nKode:\n${escapeMarkdown(stok_item)}`, {
               parse_mode: 'Markdown'
             });
@@ -265,14 +357,11 @@ bot.on('message', async (msg) => {
       return bot.sendMessage(chatId, 'Gagal mengambil daftar provider pulsa.');
     }
   }
-
   if (session && session.step === 'awaiting_provider_pulsa') {
     const provider = msg.text.trim();
     const pulsaList = session.pulsaList || [];
     const produkPulsa = pulsaList.filter(p => p.produk.toLowerCase() === provider.toLowerCase());
-    if (produkPulsa.length === 0) {
-      return bot.sendMessage(chatId, 'Provider tidak ditemukan. Pilih dari menu.');
-    }
+    if (produkPulsa.length === 0) return bot.sendMessage(chatId, 'Provider tidak ditemukan. Pilih dari menu.');
     sessions[userId] = { step: 'awaiting_nominal_pulsa', provider, produkPulsa };
     const buttons = produkPulsa.map(p => [{
       text: `${p.keterangan} - Rp${toRupiah(hargaSetelahProfit(p.harga))}`,
@@ -282,96 +371,39 @@ bot.on('message', async (msg) => {
       reply_markup: { inline_keyboard: buttons }
     });
   }
-
   if (session && session.step === 'awaiting_nomor_pulsa') {
     const nomor = msg.text.replace(/[^0-9]/g, '');
-    if (nomor.length < 10 || nomor.length > 15) {
-      return bot.sendMessage(chatId, 'Nomor HP tidak valid. Masukkan nomor yang benar.');
-    }
-    return handleOrderGame(chatId, userId, session.produk, { nomor }, 'pulsa');
+    if (nomor.length < 10 || nomor.length > 15) return bot.sendMessage(chatId, 'Nomor HP tidak valid. Masukkan nomor yang benar.');
+    await handleOrderGame(chatId, userId, session.produk, { nomor }, 'pulsa');
+    delete sessions[userId];
+    return;
   }
 
-  // === Keyboard menu produk lain ===
-  if (msg.text === '🎮 Order ML') {
-    try {
-      const res = await axios.get("https://okeconnect.com/harga/json?id=905ccd028329b0a");
-      productCache = res.data.filter(p => p.produk.toLowerCase().includes("mobile legends"));
-      sendProductPage(chatId, 0, 'ml');
-    } catch (err) {
-      bot.sendMessage(chatId, '❌ Gagal mengambil daftar produk.');
+  // === Menu game (order game) ===
+  const gameMenus = [
+    { text: '🎮 Order ML', game: 'ml', filter: "mobile legends" },
+    { text: '🔫 Order PUBG', game: 'pubg', filter: "pubg" },
+    { text: '🔥 Order Free Fire', game: 'ff', filter: "free fire" },
+    { text: '👑 Order HOK', game: 'hok', filter: "honor of king" },
+    { text: '🌌 Order Genshin', game: 'genshin', filter: "genshin" },
+    { text: '⚔️ Order Lord Mobile', game: 'lordmobile', filter: "lord mobile" },
+    { text: '🎯 Order COD', game: 'cod', filter: "call of duty" },
+    { text: '🥚 Order Eggy Party', game: 'eggy', filter: "eggy party" }
+  ];
+  for (const menu of gameMenus) {
+    if (msg.text === menu.text) {
+      try {
+        const res = await axios.get("https://okeconnect.com/harga/json?id=905ccd028329b0a");
+        productCache = res.data.filter(p => p.produk.toLowerCase().includes(menu.filter));
+        sendProductPage(chatId, 0, menu.game);
+      } catch (err) {
+        bot.sendMessage(chatId, '❌ Gagal mengambil daftar produk.');
+      }
+      return;
     }
-    return;
   }
-  if (msg.text === '🔫 Order PUBG') {
-    try {
-      const res = await axios.get("https://okeconnect.com/harga/json?id=905ccd028329b0a");
-      productCache = res.data.filter(p => p.produk.toLowerCase().includes("pubg"));
-      sendProductPage(chatId, 0, 'pubg');
-    } catch (err) {
-      bot.sendMessage(chatId, '❌ Gagal mengambil daftar produk.');
-    }
-    return;
-  }
-  if (msg.text === '🔥 Order Free Fire') {
-    try {
-      const res = await axios.get("https://okeconnect.com/harga/json?id=905ccd028329b0a");
-      productCache = res.data.filter(p => p.produk.toLowerCase().includes("free fire"));
-      sendProductPage(chatId, 0, 'ff');
-    } catch (err) {
-      bot.sendMessage(chatId, '❌ Gagal mengambil daftar produk.');
-    }
-    return;
-  }
-  if (msg.text === '👑 Order HOK') {
-    try {
-      const res = await axios.get("https://okeconnect.com/harga/json?id=905ccd028329b0a");
-      productCache = res.data.filter(p => p.produk.toLowerCase().includes("honor of king"));
-      sendProductPage(chatId, 0, 'hok');
-    } catch (err) {
-      bot.sendMessage(chatId, '❌ Gagal mengambil daftar produk.');
-    }
-    return;
-  }
-  if (msg.text === '🌌 Order Genshin') {
-    try {
-      const res = await axios.get("https://okeconnect.com/harga/json?id=905ccd028329b0a");
-      productCache = res.data.filter(p => p.produk.toLowerCase().includes("genshin"));
-      sendProductPage(chatId, 0, 'genshin');
-    } catch (err) {
-      bot.sendMessage(chatId, '❌ Gagal mengambil daftar produk.');
-    }
-    return;
-  }
-  if (msg.text === '⚔️ Order Lord Mobile') {
-    try {
-      const res = await axios.get("https://okeconnect.com/harga/json?id=905ccd028329b0a");
-      productCache = res.data.filter(p => p.produk.toLowerCase().includes("lord mobile"));
-      sendProductPage(chatId, 0, 'lordmobile');
-    } catch (err) {
-      bot.sendMessage(chatId, '❌ Gagal mengambil daftar produk.');
-    }
-    return;
-  }
-  if (msg.text === '🎯 Order COD') {
-    try {
-      const res = await axios.get("https://okeconnect.com/harga/json?id=905ccd028329b0a");
-      productCache = res.data.filter(p => p.produk.toLowerCase().includes("call of duty"));
-      sendProductPage(chatId, 0, 'cod');
-    } catch (err) {
-      bot.sendMessage(chatId, '❌ Gagal mengambil daftar produk.');
-    }
-    return;
-  }
-  if (msg.text === '🥚 Order Eggy Party') {
-    try {
-      const res = await axios.get("https://okeconnect.com/harga/json?id=905ccd028329b0a");
-      productCache = res.data.filter(p => p.produk.toLowerCase().includes("eggy party"));
-      sendProductPage(chatId, 0, 'eggy');
-    } catch (err) {
-      bot.sendMessage(chatId, '❌ Gagal mengambil daftar produk.');
-    }
-    return;
-  }
+
+  // === Manager produk (admin)
   if (msg.text === '🛠 Manager' && userId === ADMIN_ID) {
     const produkList = JSON.parse(fs.readFileSync('produk.json'));
     const buttons = produkList.map(p => [{
@@ -385,18 +417,16 @@ bot.on('message', async (msg) => {
     });
     return;
   }
-
-  // === TAMBAH PRODUK BARU DENGAN HARGA OTOMATIS SESUAI produk.json ===
+  // === Tambah produk baru
   if (session && session.mode === 'add_nama') {
     const produkList = JSON.parse(fs.readFileSync('produk.json'));
     const namaProduk = msg.text.trim();
     const produkAda = produkList.find(p => p.nama.toLowerCase() === namaProduk.toLowerCase());
     session.nama = namaProduk;
-
     if (produkAda) {
       session.harga = produkAda.harga;
       session.mode = 'add_stok';
-      return bot.sendMessage(chatId, `Harga secara otomatis diambil dari produk.json: *Rp${toRupiah(produkAda.harga)}*\n\nMasukkan *data stok* (setiap baris bisa berisi satu atau beberapa item, contoh:\nitem1, item2, item3\nbaris berikutnya juga bisa satu atau lebih, pisahkan baris dengan ENTER)`, { parse_mode: 'Markdown' });
+      return bot.sendMessage(chatId, `Harga secara otomatis diambil dari produk.json: *Rp${toRupiah(produkAda.harga)}*\n\nMasukkan *data stok* (setiap baris bisa berisi satu atau beberapa item)`, { parse_mode: 'Markdown' });
     } else {
       session.mode = 'add_harga';
       return bot.sendMessage(chatId, 'Produk baru, masukkan *harga* produk:', { parse_mode: 'Markdown' });
@@ -407,7 +437,7 @@ bot.on('message', async (msg) => {
     if (isNaN(harga)) return bot.sendMessage(chatId, '⚠️ Masukkan angka yang valid untuk harga.');
     session.harga = harga;
     session.mode = 'add_stok';
-    return bot.sendMessage(chatId, 'Masukkan *data stok* (setiap baris bisa berisi satu atau beberapa item, contoh:\nitem1, item2, item3\nbaris berikutnya juga bisa satu atau lebih, pisahkan baris dengan ENTER)', { parse_mode: 'Markdown' });
+    return bot.sendMessage(chatId, 'Masukkan *data stok* (setiap baris bisa berisi satu atau beberapa item)', { parse_mode: 'Markdown' });
   }
   if (session && session.mode === 'add_stok') {
     const stok_data = msg.text.split('\n').map(line => line.trim()).filter(Boolean);
@@ -426,94 +456,52 @@ bot.on('message', async (msg) => {
     return bot.sendMessage(chatId, `✅ Produk baru berhasil ditambahkan!\n\nNama: ${escapeMarkdown(session.nama)}\nHarga: Rp${toRupiah(session.harga)}\nJumlah baris stok: ${stok_data.length}`, { parse_mode: 'Markdown' });
   }
 
-  // === ORDER MOBILE LEGENDS, PUBG, dst ===
-  if (session && session.step === 'awaiting_userid_ml') {
-    session.userId = msg.text.trim();
-    session.step = 'awaiting_zoneid_ml';
-    return bot.sendMessage(chatId, 'Masukkan Zone ID:');
-  }
-  if (session && session.step === 'awaiting_zoneid_ml') {
-    session.zoneId = msg.text.trim();
-    const produk = productCache.find(p => p.kode === session.kode);
-    if (!produk) {
-      delete sessions[userId];
-      return bot.sendMessage(chatId, '❌ Produk tidak ditemukan.');
+  const inputSteps = [
+    { step: 'awaiting_userid_ml', game: 'ml', zone: true },
+    { step: 'awaiting_userid_pubg', game: 'pubg', zone: false },
+    { step: 'awaiting_userid_ff', game: 'ff', zone: false },
+    { step: 'awaiting_userid_hok', game: 'hok', zone: false },
+    { step: 'awaiting_userid_genshin', game: 'genshin', zone: false },
+    { step: 'awaiting_userid_lordmobile', game: 'lordmobile', zone: false },
+    { step: 'awaiting_userid_cod', game: 'cod', zone: false },
+    { step: 'awaiting_userid_eggy', game: 'eggy', zone: false }
+  ];
+  for (const stepObj of inputSteps) {
+    if (session && session.step === stepObj.step) {
+      if (stepObj.zone) {
+        session.userId = msg.text.trim();
+        session.step = `awaiting_zoneid_${stepObj.game}`;
+        return bot.sendMessage(chatId, 'Masukkan Zone ID:');
+      } else {
+        session.userId = msg.text.trim();
+        const produk = productCache.find(p => p.kode === session.kode);
+        if (!produk) {
+          delete sessions[userId];
+          return bot.sendMessage(chatId, '❌ Produk tidak ditemukan.');
+        }
+        await handleOrderGame(chatId, userId, produk, session, stepObj.game);
+        delete sessions[userId];
+        return;
+      }
     }
-    return handleOrderGame(chatId, userId, produk, session, 'ml');
-  }
-  if (session && session.step === 'awaiting_userid_pubg') {
-    session.userId = msg.text.trim();
-    const produk = productCache.find(p => p.kode === session.kode);
-    if (!produk) {
+    if (session && session.step === `awaiting_zoneid_${stepObj.game}`) {
+      session.zoneId = msg.text.trim();
+      const produk = productCache.find(p => p.kode === session.kode);
+      if (!produk) {
+        delete sessions[userId];
+        return bot.sendMessage(chatId, '❌ Produk tidak ditemukan.');
+      }
+      await handleOrderGame(chatId, userId, produk, session, stepObj.game);
       delete sessions[userId];
-      return bot.sendMessage(chatId, '❌ Produk tidak ditemukan.');
+      return;
     }
-    return handleOrderGame(chatId, userId, produk, session, 'pubg');
   }
-  if (session && session.step === 'awaiting_userid_ff') {
-    session.userId = msg.text.trim();
-    const produk = productCache.find(p => p.kode === session.kode);
-    if (!produk) {
-      delete sessions[userId];
-      return bot.sendMessage(chatId, '❌ Produk tidak ditemukan.');
-    }
-    return handleOrderGame(chatId, userId, produk, session, 'ff');
-  }
-  if (session && session.step === 'awaiting_userid_hok') {
-    session.userId = msg.text.trim();
-    const produk = productCache.find(p => p.kode === session.kode);
-    if (!produk) {
-      delete sessions[userId];
-      return bot.sendMessage(chatId, '❌ Produk tidak ditemukan.');
-    }
-    return handleOrderGame(chatId, userId, produk, session, 'hok');
-  }
-  if (session && session.step === 'awaiting_userid_genshin') {
-    session.userId = msg.text.trim();
-    const produk = productCache.find(p => p.kode === session.kode);
-    if (!produk) {
-      delete sessions[userId];
-      return bot.sendMessage(chatId, '❌ Produk tidak ditemukan.');
-    }
-    return handleOrderGame(chatId, userId, produk, session, 'genshin');
-  }
-  if (session && session.step === 'awaiting_userid_lordmobile') {
-    session.userId = msg.text.trim();
-    const produk = productCache.find(p => p.kode === session.kode);
-    if (!produk) {
-      delete sessions[userId];
-      return bot.sendMessage(chatId, '❌ Produk tidak ditemukan.');
-    }
-    return handleOrderGame(chatId, userId, produk, session, 'lordmobile');
-  }
-  if (session && session.step === 'awaiting_userid_cod') {
-    session.userId = msg.text.trim();
-    const produk = productCache.find(p => p.kode === session.kode);
-    if (!produk) {
-      delete sessions[userId];
-      return bot.sendMessage(chatId, '❌ Produk tidak ditemukan.');
-    }
-    return handleOrderGame(chatId, userId, produk, session, 'cod');
-  }
-  if (session && session.step === 'awaiting_userid_eggy') {
-    session.userId = msg.text.trim();
-    const produk = productCache.find(p => p.kode === session.kode);
-    if (!produk) {
-      delete sessions[userId];
-      return bot.sendMessage(chatId, '❌ Produk tidak ditemukan.');
-    }
-    return handleOrderGame(chatId, userId, produk, session, 'eggy');
-  }
-
-  // === ORDER DARI FILE produk.json (bukan ML) & EDIT ===
   if (session && (session.mode === 'edit_nama' || session.mode === 'edit_harga' || session.mode === 'edit_stok')) {
     const produkList = JSON.parse(fs.readFileSync('produk.json'));
     const produk = produkList.find(p => p.kode === session?.kode);
     if (!produk) return bot.sendMessage(chatId, '❌ Produk tidak ditemukan.');
-
-    if (session.mode === 'edit_nama') {
-      produk.nama = msg.text;
-    } else if (session.mode === 'edit_harga') {
+    if (session.mode === 'edit_nama') produk.nama = msg.text;
+    else if (session.mode === 'edit_harga') {
       const hargaBaru = parseInt(msg.text);
       if (isNaN(hargaBaru)) return bot.sendMessage(chatId, '⚠️ Masukkan angka yang valid untuk harga.');
       produk.harga = hargaBaru;
@@ -529,48 +517,16 @@ bot.on('message', async (msg) => {
   }
 });
 
-// === PAGINATION PRODUK GAME ===
-function sendProductPage(chatId, page, game = 'ml') {
-  const perPage = 5;
-  const totalPages = Math.ceil(productCache.length / perPage);
-  const currentProducts = productCache.slice(page * perPage, (page + 1) * perPage);
-
-  const buttons = currentProducts.map(p => [{
-    text: `${p.keterangan || p.nama} - Rp${toRupiah(hargaSetelahProfit(p.harga))}`,
-    callback_data: `${game}order_${p.kode}`
-  }]);
-
-  if (page > 0) buttons.push([{ text: '⬅️ Sebelumnya', callback_data: `${game}page_${page - 1}` }]);
-  if (page < totalPages - 1) buttons.push([{ text: '➡️ Selanjutnya', callback_data: `${game}page_${page + 1}` }]);
-
-  let title = '🛒 *Produk* ';
-  if (game === 'ml') title += 'Mobile Legends';
-  else if (game === 'pubg') title += 'PUBG';
-  else if (game === 'ff') title += 'Free Fire';
-  else if (game === 'hok') title += 'Honor of King';
-  else if (game === 'genshin') title += 'Genshin Impact';
-  else if (game === 'lordmobile') title += 'Lord Mobile';
-  else if (game === 'cod') title += 'Call of Duty';
-  else if (game === 'eggy') title += 'Eggy Party';
-
-  bot.sendMessage(chatId, `${title}\nHalaman ${page + 1} dari ${totalPages}`, {
-    parse_mode: 'Markdown',
-    reply_markup: { inline_keyboard: buttons }
-  });
-}
-
-// === CALLBACK QUERY HANDLER ===
+// ==== HANDLER CALLBACK ====
 bot.on('callback_query', async (cb) => {
   const chatId = cb.message.chat.id;
   const userId = cb.from.id.toString();
   const data = cb.data;
   const produkList = JSON.parse(fs.readFileSync('produk.json'));
   const session = sessions[userId];
-
-  // Tambah user ke user.json setiap interaksi
   ensureUser(cb.from);
 
-  // === CALLBACK PULSA ===
+  // === Pulsa
   if (data.startsWith('pilihnominalpulsa_')) {
     const kode = data.replace('pilihnominalpulsa_', '');
     const produk = (session?.produkPulsa || []).find(p => p.kode === kode);
@@ -578,196 +534,47 @@ bot.on('callback_query', async (cb) => {
     sessions[userId] = { step: 'awaiting_nomor_pulsa', produkPulsa: session.produkPulsa, produk };
     return bot.sendMessage(chatId, `Masukkan nomor HP tujuan untuk ${produk.keterangan}:`);
   }
-
-  // ORDER MOBILE LEGENDS
-  if (data.startsWith('mlorder_')) {
-    const kode = data.replace('mlorder_', '');
-    const produk = productCache.find(p => p.kode === kode);
-    if (!produk) return bot.sendMessage(chatId, '❌ Produk tidak ditemukan.');
-    sessions[userId] = { kode, step: 'awaiting_userid_ml' };
-    bot.sendMessage(chatId, 'Masukkan User ID:');
-    return;
-  } else if (data.startsWith('mlpage_')) {
-    const page = parseInt(data.split('_')[1]);
-    sendProductPage(chatId, page, 'ml');
-    return;
+  // === Game order & pagination
+  const gameOrderCallback = [
+    { prefix: 'mlorder_', game: 'ml', step: 'awaiting_userid_ml' },
+    { prefix: 'pubgorder_', game: 'pubg', step: 'awaiting_userid_pubg' },
+    { prefix: 'fforder_', game: 'ff', step: 'awaiting_userid_ff' },
+    { prefix: 'hokorder_', game: 'hok', step: 'awaiting_userid_hok' },
+    { prefix: 'genshinorder_', game: 'genshin', step: 'awaiting_userid_genshin' },
+    { prefix: 'lordmobileorder_', game: 'lordmobile', step: 'awaiting_userid_lordmobile' },
+    { prefix: 'codorder_', game: 'cod', step: 'awaiting_userid_cod' },
+    { prefix: 'eggyorder_', game: 'eggy', step: 'awaiting_userid_eggy' }
+  ];
+  for (const go of gameOrderCallback) {
+    if (data.startsWith(go.prefix)) {
+      const kode = data.replace(go.prefix, '');
+      const produk = productCache.find(p => p.kode === kode);
+      if (!produk) return bot.sendMessage(chatId, '❌ Produk tidak ditemukan.');
+      sessions[userId] = { kode, step: go.step };
+      bot.sendMessage(chatId, `Masukkan User ID${go.game === 'ml' ? '' : ` ${go.game.toUpperCase()}`}:`);
+      return;
+    }
+    if (data.startsWith(go.game + 'page_')) {
+      const page = parseInt(data.split('_')[1]);
+      sendProductPage(chatId, page, go.game);
+      return;
+    }
   }
-
-  // ORDER PUBG
-  if (data.startsWith('pubgorder_')) {
-    const kode = data.replace('pubgorder_', '');
-    const produk = productCache.find(p => p.kode === kode);
-    if (!produk) return bot.sendMessage(chatId, '❌ Produk tidak ditemukan.');
-    sessions[userId] = { kode, step: 'awaiting_userid_pubg' };
-    bot.sendMessage(chatId, 'Masukkan User ID PUBG:');
-    return;
-  } else if (data.startsWith('pubgpage_')) {
-    const page = parseInt(data.split('_')[1]);
-    sendProductPage(chatId, page, 'pubg');
-    return;
-  }
-
-  // ORDER FREE FIRE
-  if (data.startsWith('fforder_')) {
-    const kode = data.replace('fforder_', '');
-    const produk = productCache.find(p => p.kode === kode);
-    if (!produk) return bot.sendMessage(chatId, '❌ Produk tidak ditemukan.');
-    sessions[userId] = { kode, step: 'awaiting_userid_ff' };
-    bot.sendMessage(chatId, 'Masukkan User ID Free Fire:');
-    return;
-  } else if (data.startsWith('ffpage_')) {
-    const page = parseInt(data.split('_')[1]);
-    sendProductPage(chatId, page, 'ff');
-    return;
-  }
-
-  // ORDER HOK
-  if (data.startsWith('hokorder_')) {
-    const kode = data.replace('hokorder_', '');
-    const produk = productCache.find(p => p.kode === kode);
-    if (!produk) return bot.sendMessage(chatId, '❌ Produk tidak ditemukan.');
-    sessions[userId] = { kode, step: 'awaiting_userid_hok' };
-    bot.sendMessage(chatId, 'Masukkan User ID Honor of King:');
-    return;
-  } else if (data.startsWith('hokpage_')) {
-    const page = parseInt(data.split('_')[1]);
-    sendProductPage(chatId, page, 'hok');
-    return;
-  }
-
-  // ORDER GENSHIN
-  if (data.startsWith('genshinorder_')) {
-    const kode = data.replace('genshinorder_', '');
-    const produk = productCache.find(p => p.kode === kode);
-    if (!produk) return bot.sendMessage(chatId, '❌ Produk tidak ditemukan.');
-    sessions[userId] = { kode, step: 'awaiting_userid_genshin' };
-    bot.sendMessage(chatId, 'Masukkan User ID Genshin Impact:');
-    return;
-  } else if (data.startsWith('genshinpage_')) {
-    const page = parseInt(data.split('_')[1]);
-    sendProductPage(chatId, page, 'genshin');
-    return;
-  }
-
-  // ORDER LORD MOBILE
-  if (data.startsWith('lordmobileorder_')) {
-    const kode = data.replace('lordmobileorder_', '');
-    const produk = productCache.find(p => p.kode === kode);
-    if (!produk) return bot.sendMessage(chatId, '❌ Produk tidak ditemukan.');
-    sessions[userId] = { kode, step: 'awaiting_userid_lordmobile' };
-    bot.sendMessage(chatId, 'Masukkan User ID Lord Mobile:');
-    return;
-  } else if (data.startsWith('lordmobilepage_')) {
-    const page = parseInt(data.split('_')[1]);
-    sendProductPage(chatId, page, 'lordmobile');
-    return;
-  }
-
-  // ORDER COD
-  if (data.startsWith('codorder_')) {
-    const kode = data.replace('codorder_', '');
-    const produk = productCache.find(p => p.kode === kode);
-    if (!produk) return bot.sendMessage(chatId, '❌ Produk tidak ditemukan.');
-    sessions[userId] = { kode, step: 'awaiting_userid_cod' };
-    bot.sendMessage(chatId, 'Masukkan User ID Call of Duty:');
-    return;
-  } else if (data.startsWith('codpage_')) {
-    const page = parseInt(data.split('_')[1]);
-    sendProductPage(chatId, page, 'cod');
-    return;
-  }
-
-  // ORDER EGGY PARTY
-  if (data.startsWith('eggyorder_')) {
-    const kode = data.replace('eggyorder_', '');
-    const produk = productCache.find(p => p.kode === kode);
-    if (!produk) return bot.sendMessage(chatId, '❌ Produk tidak ditemukan.');
-    sessions[userId] = { kode, step: 'awaiting_userid_eggy' };
-    bot.sendMessage(chatId, 'Masukkan User ID Eggy Party:');
-    return;
-  } else if (data.startsWith('eggypage_')) {
-    const page = parseInt(data.split('_')[1]);
-    sendProductPage(chatId, page, 'eggy');
-    return;
-  }
-
-  // ORDER DARI FILE produk.json (bukan ML)
+  // === Produk manual dari produk.json (tidak perlu pesan error di sini)
   if (data.startsWith('produkjson_')) {
-    const kode = data.replace('produkjson_', '');
-    const produk = produkList.find(p => p.kode === kode);
-    if (!produk || produk.stok < 1) return bot.sendMessage(chatId, '❌ Produk tidak tersedia atau stok habis.');
-
-    const role = 'user';
-    const basePrice = hargaSetelahProfit(produk.harga);
-    const fee = generateRandomFee();
-    const total = basePrice + fee;
-    const reffId = crypto.randomBytes(5).toString("hex").toUpperCase();
-    const expireAt = Date.now() + 5 * 60000;
-    const formattedTime = new Date(expireAt).toLocaleTimeString('id-ID', { timeZone: 'Asia/Jakarta', hour: '2-digit', minute: '2-digit' });
-
-    const qrisImage = 'img/qris.jpg';
-    let caption = `*🧾 MENUNGGU PEMBAYARAN 🧾*\n\n*Produk:* ${escapeMarkdown(produk.nama)}\nHarga: Rp${toRupiah(basePrice)} + 2 digit acak\nTotal: Rp${toRupiah(total)}\n\nSilakan bayar sebelum *${formattedTime}* atau pesanan otomatis dibatalkan.`;
-
-    await bot.sendPhoto(chatId, fs.createReadStream(qrisImage), {
-      caption,
-      parse_mode: 'Markdown',
-      reply_markup: {
-        inline_keyboard: [[{ text: '❌ Batalkan Pesanan', callback_data: `cancel_${userId}` }]]
-      }
-    });
-
-    const interval = setInterval(async () => {
-      if (Date.now() >= expireAt) {
-        clearInterval(interval);
-        return bot.sendMessage(chatId, '❌ Waktu pembayaran habis. Pesanan dibatalkan.');
-      }
-
-      try {
-        const check = await axios.get(`https://gateway.okeconnect.com/api/mutasi/qris/${memberId}/${apikey_orkut}`);
-        const found = check.data.data.find(i => i.type === 'CR' && i.qris === 'static' && parseInt(i.amount) === total);
-
-        if (found) {
-          clearInterval(interval);
-          bot.sendMessage(chatId, '✅ Pembayaran diterima! Memproses pesanan...');
-
-          const prod = produkList.find(p => p.kode === kode);
-          let stok_item;
-          for (let i = 0; i < prod.stok_data.length; i++) {
-            if (prod.stok_data[i].trim() !== '') {
-              stok_item = prod.stok_data[i];
-              prod.stok_data.splice(i, 1);
-              break;
-            }
-          }
-          prod.stok = prod.stok_data.length;
-          fs.writeFileSync('produk.json', JSON.stringify(produkList, null, 2));
-
-          bot.sendMessage(chatId, `🎉 *TRANSAKSI SUKSES* 🎉\n\nProduk: ${escapeMarkdown(prod.nama)}\nRefID: ${escapeMarkdown(reffId)}\nKode:\n${escapeMarkdown(stok_item)}`, {
-            parse_mode: 'Markdown'
-          });
-        }
-      } catch (err) {
-        console.log('ERROR:', err.message);
-      }
-    }, 10000);
-
-    sessions[userId] = { ...sessions[userId], interval };
-    return;
+    return bot.sendMessage(chatId, 'Silakan pilih produk dari menu utama, bukan dari callback.');
   }
-
-  // MANAGER
+  // === Manager produk
   if (data.startsWith('manage_')) {
     const kode = data.replace('manage_', '');
     const produk = produkList.find(p => p.kode === kode);
     if (!produk) return bot.sendMessage(chatId, '❌ Produk tidak ditemukan.');
-
     sessions[userId] = { mode: 'manage', kode };
     const buttons = [
       [{ text: '📝 Ubah Nama', callback_data: `edit_nama_${kode}` }],
       [{ text: '💵 Ubah Harga', callback_data: `edit_harga_${kode}` }],
       [{ text: '➕ Tambah Stok', callback_data: `edit_stok_${kode}` }]
     ];
-
     bot.sendMessage(chatId, `🛠 *Edit Produk:* ${escapeMarkdown(produk.nama)}`, {
       parse_mode: 'Markdown',
       reply_markup: { inline_keyboard: buttons }
@@ -780,13 +587,12 @@ bot.on('callback_query', async (cb) => {
     bot.sendMessage(chatId, `Kirim ${label} untuk produk ${escapeMarkdown(kode)}:`);
     return;
   }
-  // Tambah produk baru
   if (data === 'add_produk_baru') {
     sessions[userId] = { mode: 'add_nama' };
     bot.sendMessage(chatId, 'Masukkan *nama* produk:', { parse_mode: 'Markdown' });
     return;
   }
-  // Batalkan pesanan
+  // === Batalkan pesanan
   if (data.startsWith('cancel_')) {
     const uid = data.split('_')[1];
     if (sessions[uid]) {
@@ -799,87 +605,3 @@ bot.on('callback_query', async (cb) => {
     return;
   }
 });
-
-// === FUNGSI HANDLE ORDER GAME ===
-async function handleOrderGame(chatId, userId, produk, session, game) {
-  let nickname = '';
-  let detailUser = '';
-  if (game === 'pulsa') {
-    nickname = session.nomor;
-    detailUser = `*Nomor HP:* ${escapeMarkdown(session.nomor)}`;
-  } else if (game === 'ml') {
-    nickname = `${produk.produk || produk.nama}_${session.userId}_${session.zoneId}`;
-    detailUser = `*User ID:* ${escapeMarkdown(session.userId)}\n*Zone ID:* ${escapeMarkdown(session.zoneId)}`;
-  } else if (game === 'pubg') {
-    nickname = `${produk.produk || produk.nama}_${session.userId}`;
-    detailUser = `*User ID PUBG:* ${escapeMarkdown(session.userId)}`;
-  } else if (game === 'ff') {
-    nickname = `${produk.produk || produk.nama}_${session.userId}`;
-    detailUser = `*User ID Free Fire:* ${escapeMarkdown(session.userId)}`;
-  } else if (game === 'hok') {
-    nickname = `${produk.produk || produk.nama}_${session.userId}`;
-    detailUser = `*User ID HOK:* ${escapeMarkdown(session.userId)}`;
-  } else if (game === 'genshin') {
-    nickname = `${produk.produk || produk.nama}_${session.userId}`;
-    detailUser = `*User ID Genshin:* ${escapeMarkdown(session.userId)}`;
-  } else if (game === 'lordmobile') {
-    nickname = `${produk.produk || produk.nama}_${session.userId}`;
-    detailUser = `*User ID Lord Mobile:* ${escapeMarkdown(session.userId)}`;
-  } else if (game === 'cod') {
-    nickname = `${produk.produk || produk.nama}_${session.userId}`;
-    detailUser = `*User ID COD:* ${escapeMarkdown(session.userId)}`;
-  } else if (game === 'eggy') {
-    nickname = `${produk.produk || produk.nama}_${session.userId}`;
-    detailUser = `*User ID Eggy Party:* ${escapeMarkdown(session.userId)}`;
-  } else {
-    nickname = `${produk.produk || produk.nama}_${session.userId}`;
-    detailUser = `*User ID:* ${escapeMarkdown(session.userId)}`;
-  }
-
-  const reffId = crypto.randomBytes(5).toString("hex").toUpperCase();
-  const basePrice = hargaSetelahProfit(produk.harga, 'user', produk.kategori);
-  const fee = generateRandomFee();
-  const total = basePrice + fee;
-
-  const qrisImage = 'img/qris.jpg';
-  const expireAt = Date.now() + 5 * 60000;
-  const formattedTime = new Date(expireAt).toLocaleTimeString('id-ID', { timeZone: 'Asia/Jakarta', hour: '2-digit', minute: '2-digit' });
-
-  let caption = `*🧾 MENUNGGU PEMBAYARAN 🧾*\n\n*Produk ID:* ${escapeMarkdown(produk.kode)}\n${detailUser}\n*Nickname:* ${escapeMarkdown(nickname)}\n\nKategori: ${escapeMarkdown(produk.kategori || produk.produk || produk.nama)}\nHarga: Rp${toRupiah(basePrice)} + 2 digit acak\nTotal: Rp${toRupiah(total)}\n\nSilakan bayar sebelum *${formattedTime}* atau pesanan otomatis dibatalkan.`;
-
-  await bot.sendPhoto(chatId, fs.createReadStream(qrisImage), {
-    caption,
-    parse_mode: 'Markdown',
-    reply_markup: {
-      inline_keyboard: [[{ text: '❌ Batalkan Pesanan', callback_data: `cancel_${userId}` }]]
-    }
-  });
-
-  const interval = setInterval(async () => {
-    if (Date.now() >= expireAt) {
-      clearInterval(interval);
-      delete sessions[userId];
-      return bot.sendMessage(chatId, '❌ Waktu pembayaran habis. Pesanan dibatalkan.');
-    }
-
-    try {
-      const check = await axios.get(`https://gateway.okeconnect.com/api/mutasi/qris/${memberId}/${apikey_orkut}`);
-      const found = check.data.data.find(i => i.type === 'CR' && i.qris === 'static' && parseInt(i.amount) === total);
-
-      if (found) {
-        clearInterval(interval);
-        bot.sendMessage(chatId, '✅ Pembayaran diterima! Memproses pesanan...');
-
-        let suksesMsg = `🎉 *TRANSAKSI SUKSES* 🎉\n\nProduk: ${escapeMarkdown(produk.keterangan || produk.nama)}\nRefID: ${escapeMarkdown(reffId)}\n${detailUser}\nNickname: ${escapeMarkdown(nickname)}`;
-        bot.sendMessage(chatId, suksesMsg, { parse_mode: 'Markdown' });
-
-        delete sessions[userId];
-      }
-    } catch (err) {
-      console.log('ERROR:', err.message);
-    }
-  }, 10000);
-
-  sessions[userId].interval = interval;
-  session.step = null;
-}
